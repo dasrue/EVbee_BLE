@@ -27,6 +27,31 @@ evbee_write_uuid   = "48535343-1E4D-4BD9-BA61-23C647249616"
 evbee_notify_uuid  = "49535343-1E4D-4BD9-BA61-23c647249616"
 
 evbee_write_pkt = None
+evbee_plug_status = 0
+
+# Check if charging allowed, based on Peak/OffPeak rates where I live
+def is_charging_allowed():
+
+    now = datetime.datetime.today()
+
+    # Allow charging 24/7 on the weekend
+    if now.weekday() >= 5:
+        return True
+    
+    # Allow charging between 00:00 - 07:00 on weekday
+    if now.hour < 7:
+        return True
+    
+    # Allow charging between 11:00 - 17:00 on weekday
+    if now.hour >= 11 and now.hour < 17:
+        return True
+    
+    # Allow charging after 21:00 on weekday
+    if now.hour >= 21:
+        return True
+    
+    # Deny charging 07:00 - 11:00 and 17:00 - 21:00 on weekday
+    return False
 
 def evbee_build_pkt(cmd, cmd_data):
     cmd_len = len(cmd_data)
@@ -45,6 +70,7 @@ def evbee_decode_pkt(pkt_data):
 
 def evbee_handle_cmd(decoded):
     global evbee_write_pkt
+    global evbee_plug_status
 
     # 0x0001 = Response to 0x0000 initialise command. Send 0x0004 command to set the time
     if(decoded["cmd"] == 0x0001):
@@ -67,8 +93,9 @@ def evbee_handle_cmd(decoded):
 
     # 0x0104 = Charger status update. Send 0x0105 to ACK the update and keep the time up to date
     elif(decoded["cmd"] == 0x0104):
+        evbee_plug_status = int(decoded["data"][1])
         print("Staus update: Plug status = ", 
-              int(decoded["data"][1]), 
+              evbee_plug_status, 
               ", Voltage = ", 
               int.from_bytes(decoded["data"][4:6], 'little') / 100.0, 
               "V, Current = ", 
@@ -83,8 +110,9 @@ def evbee_handle_cmd(decoded):
     
     # 0x0105 = Different charger status update. No response needed from this
     elif(decoded["cmd"] == 0x0105):
+        evbee_plug_status = int(decoded["data"][1])
         print("Staus update2: Plug status = ", 
-              int(decoded["data"][1]), 
+              evbee_plug_status, 
               ", Voltage = ", 
               int.from_bytes(decoded["data"][4:6], 'little') / 100.0, 
               "V, Current = ", 
@@ -124,6 +152,24 @@ async def main():
             if evbee_write_pkt != None:
                 await client.write_gatt_char(evbee_write_uuid, evbee_write_pkt, response=True)
                 evbee_write_pkt = None
+            
+            # Car plugged in, not charging and charging allowed, send start charge command
+            elif evbee_plug_status == 1 and is_charging_allowed():
+                unix_ts = int(time.time())
+                cmddata = b'\x00\x00\x00\x00\x00\x00\x00\x00' + unix_ts.to_bytes(4, 'little') + b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+                pkt = evbee_build_pkt(0x0100, cmddata)
+                print("Sending start charge command")
+                await client.write_gatt_char(evbee_write_uuid, pkt, response=True)
+                await asyncio.sleep(1)
+
+            # Car plugged is charging and charging not, send stop charge command
+            elif evbee_plug_status == 2 and not is_charging_allowed():
+                cmddata = b'\x00\x00\x00\x00'
+                pkt = evbee_build_pkt(0x0102, cmddata)
+                print("Sending stop charge command")
+                await client.write_gatt_char(evbee_write_uuid, pkt, response=True)
+                await asyncio.sleep(1)
+            
 
 if __name__ == "__main__":
     asyncio.run(main())
