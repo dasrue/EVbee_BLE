@@ -13,6 +13,7 @@ import asyncio
 import logging
 import binascii
 import time
+import datetime
 
 from bleak import BleakClient, BleakScanner
 from bleak.backends.characteristic import BleakGATTCharacteristic
@@ -79,6 +80,20 @@ def evbee_handle_cmd(decoded):
               "kWh")
         unix_ts = int(time.time())
         evbee_write_pkt = evbee_build_pkt(0x0004, unix_ts.to_bytes(4, 'little'))
+    
+    # 0x0105 = Different charger status update. No response needed from this
+    elif(decoded["cmd"] == 0x0105):
+        print("Staus update2: Plug status = ", 
+              int(decoded["data"][1]), 
+              ", Voltage = ", 
+              int.from_bytes(decoded["data"][4:6], 'little') / 100.0, 
+              "V, Current = ", 
+              int.from_bytes(decoded["data"][6:8], 'little') / 100.0,
+              "A, Charge Time = ",
+              int.from_bytes(decoded["data"][8:12], 'little'),
+              "s, Energy = ",
+              int.from_bytes(decoded["data"][12:14], 'little') / 1000.0,
+              "kWh")
     
 
 
