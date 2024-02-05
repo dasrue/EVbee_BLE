@@ -134,6 +134,8 @@ def notification_handler(characteristic: BleakGATTCharacteristic, data: bytearra
 
 async def main():
     global evbee_write_pkt
+    evbee_charge_command_sent = int(time.time())
+
     print("Searching for BLE device '%s'", evbee_name)
     device = await BleakScanner.find_device_by_name(evbee_name)
     if device is None:
@@ -149,26 +151,29 @@ async def main():
         await client.write_gatt_char(evbee_write_uuid, pkt_init, response=True)
         while True:
             await asyncio.sleep(0.01)
+            unix_ts = int(time.time())
+
             if evbee_write_pkt != None:
                 await client.write_gatt_char(evbee_write_uuid, evbee_write_pkt, response=True)
                 evbee_write_pkt = None
             
-            # Car plugged in, not charging and charging allowed, send start charge command
-            elif evbee_plug_status == 1 and is_charging_allowed():
-                unix_ts = int(time.time())
-                cmddata = b'\x00\x00\x00\x00\x00\x00\x00\x00' + unix_ts.to_bytes(4, 'little') + b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
-                pkt = evbee_build_pkt(0x0100, cmddata)
-                print("Sending start charge command")
-                await client.write_gatt_char(evbee_write_uuid, pkt, response=True)
-                await asyncio.sleep(1)
+            # Only send max 1 charge/discharge command every 30 seconds
+            if unix_ts - evbee_charge_command_sent > 30:
+                # Car plugged in, not charging and charging allowed, send start charge command
+                if evbee_plug_status == 1 and is_charging_allowed():
+                    cmddata = b'\x00\x00\x00\x00\x00\x00\x00\x00' + unix_ts.to_bytes(4, 'little') + b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+                    pkt = evbee_build_pkt(0x0100, cmddata)
+                    print("Sending start charge command")
+                    await client.write_gatt_char(evbee_write_uuid, pkt, response=True)
+                    evbee_charge_command_sent = int(time.time())
 
-            # Car plugged is charging and charging not, send stop charge command
-            elif evbee_plug_status == 2 and not is_charging_allowed():
-                cmddata = b'\x00\x00\x00\x00'
-                pkt = evbee_build_pkt(0x0102, cmddata)
-                print("Sending stop charge command")
-                await client.write_gatt_char(evbee_write_uuid, pkt, response=True)
-                await asyncio.sleep(1)
+                # Car plugged is charging and charging not, send stop charge command
+                elif evbee_plug_status == 2 and not is_charging_allowed():
+                    cmddata = b'\x00\x00\x00\x00'
+                    pkt = evbee_build_pkt(0x0102, cmddata)
+                    print("Sending stop charge command")
+                    await client.write_gatt_char(evbee_write_uuid, pkt, response=True)
+                    evbee_charge_command_sent = int(time.time())
             
 
 if __name__ == "__main__":
