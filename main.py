@@ -135,7 +135,7 @@ def notification_handler(characteristic: BleakGATTCharacteristic, data: bytearra
     print("Received notify from ", characteristic, decoded)
     evbee_handle_cmd(decoded)
     if decoded["datalen"] < (len(data) - 12):    # More data to decode
-        decoded2 = evbee_decode_pkt(data[decoded["datalen"] + 12])
+        decoded2 = evbee_decode_pkt(data[decoded["datalen"] + 12:])
         evbee_handle_cmd(decoded2)
 
 
