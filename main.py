@@ -33,6 +33,9 @@ evbee_plug_status = 0
 def is_charging_allowed():
 
     now = datetime.datetime.today()
+    
+    # Temp allow charging now
+    #return True
 
     # Allow charging 24/7 on the weekend
     if now.weekday() >= 5:
@@ -65,7 +68,8 @@ def evbee_decode_pkt(pkt_data):
     if pkt_data[0] == 0x5A and pkt_data[1] == 0x5A:
         rtn_dict["cmd"] = int.from_bytes(pkt_data[4:6], 'little')
         rtn_dict["datalen"] = int.from_bytes(pkt_data[6:8], 'little')
-        rtn_dict["data"] = pkt_data[8:(len(pkt_data)-4)]
+        pkt_data_end = min(len(pkt_data) - 4, rtn_dict["datalen"] + 8)
+        rtn_dict["data"] = pkt_data[8:pkt_data_end]
     return rtn_dict
 
 def evbee_handle_cmd(decoded):
@@ -130,6 +134,9 @@ def notification_handler(characteristic: BleakGATTCharacteristic, data: bytearra
     decoded = evbee_decode_pkt(data)
     print("Received notify from ", characteristic, decoded)
     evbee_handle_cmd(decoded)
+    if decoded["datalen"] < (len(data) - 12):    # More data to decode
+        decoded2 = evbee_decode_pkt(data[decoded["datalen"] + 12])
+        evbee_handle_cmd(decoded2)
 
 
 async def main():
