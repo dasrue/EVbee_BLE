@@ -14,11 +14,20 @@ import logging
 import binascii
 import time
 import datetime
+import json
 
 from bleak import BleakClient, BleakScanner
 from bleak.backends.characteristic import BleakGATTCharacteristic
+from paho.mqtt import client as mqtt_client
 
 #logger = logging.getLogger(__name__)
+
+mqtt_broker = 'broker'
+mqtt_port = 1883
+mqtt_topic = "power/evse"
+mqtt_cid = 'evbee'
+mqtt_user = 'user'
+mqtt_pass = 'pass'
 
 # EVBee UUIDs
 evbee_name         = "EVbee_6E0D"
@@ -28,14 +37,12 @@ evbee_notify_uuid  = "49535343-1E4D-4BD9-BA61-23c647249616"
 
 evbee_write_pkt = None
 evbee_plug_status = 0
+mq_client = None
 
 # Check if charging allowed, based on Peak/OffPeak rates where I live
 def is_charging_allowed():
 
     now = datetime.datetime.today()
-    
-    # Temp allow charging now
-    #return True
 
     # Allow charging 24/7 on the weekend
     if now.weekday() >= 5:
@@ -56,6 +63,41 @@ def is_charging_allowed():
     # Deny charging 07:00 - 11:00 and 17:00 - 21:00 on weekday
     return False
 
+def evbee_plug_status_str(status):
+    if(status == 0):
+        return 'unplugged'
+    elif(status == 1):
+        return 'waiting'
+    elif(status == 2):
+        return 'charging'
+    else:
+        return 'unknown'
+    
+# Reconnect code from https://www.emqx.com/en/blog/how-to-use-mqtt-in-python
+FIRST_RECONNECT_DELAY = 1
+RECONNECT_RATE = 2
+MAX_RECONNECT_COUNT = 12
+MAX_RECONNECT_DELAY = 60
+
+def on_mqtt_disconnect(client, userdata, rc):
+    logging.info("MQTT disconnected with result code: %s", rc)
+    reconnect_count, reconnect_delay = 0, FIRST_RECONNECT_DELAY
+    while reconnect_count < MAX_RECONNECT_COUNT:
+        logging.info("MQTT reconnecting in %d seconds...", reconnect_delay)
+        time.sleep(reconnect_delay)
+
+        try:
+            client.reconnect()
+            logging.info("MQTT reconnected successfully!")
+            return
+        except Exception as err:
+            logging.error("MQTT %s. reconnect failed. Retrying...", err)
+
+        reconnect_delay *= RECONNECT_RATE
+        reconnect_delay = min(reconnect_delay, MAX_RECONNECT_DELAY)
+        reconnect_count += 1
+    logging.info("MQTT reconnect failed after %s attempts. Exiting...", reconnect_count)
+
 def evbee_build_pkt(cmd, cmd_data):
     cmd_len = len(cmd_data)
     total_len = len(cmd_data) + 12
@@ -68,13 +110,13 @@ def evbee_decode_pkt(pkt_data):
     if pkt_data[0] == 0x5A and pkt_data[1] == 0x5A:
         rtn_dict["cmd"] = int.from_bytes(pkt_data[4:6], 'little')
         rtn_dict["datalen"] = int.from_bytes(pkt_data[6:8], 'little')
-        pkt_data_end = min(len(pkt_data) - 4, rtn_dict["datalen"] + 8)
-        rtn_dict["data"] = pkt_data[8:pkt_data_end]
+        rtn_dict["data"] = pkt_data[8:(len(pkt_data)-4)]
     return rtn_dict
 
 def evbee_handle_cmd(decoded):
     global evbee_write_pkt
     global evbee_plug_status
+    global mq_client
 
     # 0x0001 = Response to 0x0000 initialise command. Send 0x0004 command to set the time
     if(decoded["cmd"] == 0x0001):
@@ -98,35 +140,54 @@ def evbee_handle_cmd(decoded):
     # 0x0104 = Charger status update. Send 0x0105 to ACK the update and keep the time up to date
     elif(decoded["cmd"] == 0x0104):
         evbee_plug_status = int(decoded["data"][1])
-        print("Staus update: Plug status = ", 
-              evbee_plug_status, 
+        status_update = {
+            "plug": evbee_plug_status_str(evbee_plug_status),
+            "voltage": int.from_bytes(decoded["data"][4:6], 'little') / 100.0,
+            "current": int.from_bytes(decoded["data"][6:8], 'little') / 100.0,
+            "timeoncharge": int.from_bytes(decoded["data"][8:12], 'little'),
+            "energy": int.from_bytes(decoded["data"][12:14], 'little') / 1000.0
+        }
+        
+        print("Status update: Plug status = ", 
+              status_update["plug"], 
               ", Voltage = ", 
-              int.from_bytes(decoded["data"][4:6], 'little') / 100.0, 
+              status_update["voltage"], 
               "V, Current = ", 
-              int.from_bytes(decoded["data"][6:8], 'little') / 100.0,
+              status_update["current"],
               "A, Charge Time = ",
-              int.from_bytes(decoded["data"][8:12], 'little'),
+              status_update["timeoncharge"],
               "s, Energy = ",
-              int.from_bytes(decoded["data"][12:14], 'little') / 1000.0,
+              status_update["energy"],
               "kWh")
+        if(mq_client.is_connected()):
+            mq_client.publish(mqtt_topic + '/status', json.dumps(status_update))
         unix_ts = int(time.time())
         evbee_write_pkt = evbee_build_pkt(0x0004, unix_ts.to_bytes(4, 'little'))
     
     # 0x0105 = Different charger status update. No response needed from this
     elif(decoded["cmd"] == 0x0105):
         evbee_plug_status = int(decoded["data"][1])
-        print("Staus update2: Plug status = ", 
-              evbee_plug_status, 
+        status_update = {
+            "plug": evbee_plug_status_str(evbee_plug_status),
+            "voltage": int.from_bytes(decoded["data"][4:6], 'little') / 100.0,
+            "current": int.from_bytes(decoded["data"][6:8], 'little') / 100.0,
+            "timeoncharge": int.from_bytes(decoded["data"][8:12], 'little'),
+            "energy": int.from_bytes(decoded["data"][12:14], 'little') / 1000.0
+        }
+
+        print("Status update2: Plug status = ", 
+              status_update["plug"], 
               ", Voltage = ", 
-              int.from_bytes(decoded["data"][4:6], 'little') / 100.0, 
+              status_update["voltage"], 
               "V, Current = ", 
-              int.from_bytes(decoded["data"][6:8], 'little') / 100.0,
+              status_update["current"],
               "A, Charge Time = ",
-              int.from_bytes(decoded["data"][8:12], 'little'),
+              status_update["timeoncharge"],
               "s, Energy = ",
-              int.from_bytes(decoded["data"][12:14], 'little') / 1000.0,
+              status_update["energy"],
               "kWh")
-    
+        if(mq_client.is_connected()):
+            mq_client.publish(mqtt_topic + '/status', json.dumps(status_update))
 
 
 def notification_handler(characteristic: BleakGATTCharacteristic, data: bytearray):
@@ -134,14 +195,19 @@ def notification_handler(characteristic: BleakGATTCharacteristic, data: bytearra
     decoded = evbee_decode_pkt(data)
     print("Received notify from ", characteristic, decoded)
     evbee_handle_cmd(decoded)
-    if decoded["datalen"] < (len(data) - 12):    # More data to decode
-        decoded2 = evbee_decode_pkt(data[decoded["datalen"] + 12:])
-        evbee_handle_cmd(decoded2)
 
 
 async def main():
     global evbee_write_pkt
+    global mq_client
     evbee_charge_command_sent = int(time.time())
+
+    
+    mq_client = mqtt_client.Client(mqtt_cid)
+    mq_client.username_pw_set(mqtt_user, mqtt_pass)
+    mq_client.on_disconnect = on_mqtt_disconnect
+    mq_client.connect(mqtt_broker, mqtt_port)
+    mq_client.loop_start()
 
     while True:
         print("Searching for BLE device", evbee_name)
